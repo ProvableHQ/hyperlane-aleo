@@ -3,13 +3,13 @@ import hyp_mailbox.aleo;
 import token_registry.aleo;
 import hyp_multisig_core.aleo;
 
-// The 'hyp_collateral' implements the Hyperlane Hyp Collateral Token which is used
+// The 'hyp_synthetic' implements the Hyperlane Hyp Synthetic Token which is used
 // for bridging tokens from other chains to the Aleo network. It uses the token_registry program.
 // It needs to define an owner address which is allowed to change the configuration
 // of the program. If no changes are needed anymore the owner_address can be set to the
 // NULL_ADDRESS to prevent further modification.
 // This is independent from the aleo program owner which is allowed to upgrade the contract.
-program hyp_collateral.aleo {
+program hyp_warp_token_eth.aleo {
 
     // The program needs to know with which other contracts from other blockchains it can communicate.
     // For each destination chain it is required to enroll an remote router containing the correspondents address
@@ -29,7 +29,7 @@ program hyp_collateral.aleo {
     // The metadata is queried by the relayer and passed to the process function.
     mapping app_metadata: bool => Metadata;
 
-    const TYPE_COLLATERAL: u8 = 2u8;
+    const TYPE_SYNTHETIC: u8 = 1u8;
 
     struct ChecksumEdition {
         checksum: [u8; 32],
@@ -79,35 +79,39 @@ program hyp_collateral.aleo {
 
     const NULL_ADDRESS: address = aleo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq3ljyzc;
 
-    // Initialize the Collateral token.
+    // Initialize the Synthetic token.
     // Whoever calls this function will be set as the owner
-    // This method calls the token_registry to gain addition token metadata
-    async transition init(public program_id: [u8; 128], public token_id: field, public remote_decimals: u8) -> Future {
+    // This method calls the token_registry to create a new token.
+    // `name`, `symbol` and `decimals` are directly passed to the `register_token` transition.
+    async transition init(public program_id: [u8; 128], public name: u128, public symbol: u128, public local_decimals: u8, public remote_decimals: u8) -> Future {
         let caller = self.caller;
         let max_u128 = !0u128;
+        let token_id = self.address as field;
+
+        let difference = remote_decimals as i16 - local_decimals as i16;
+        assert_eq(difference.abs() <= 18i16, true);
+
+        // Register a new token with no supply limit and no external authority.
+        // This program will be the owner of the token.
+        let register_token_future: Future = token_registry.aleo/register_token(token_id, name, symbol, local_decimals, max_u128, false, NULL_ADDRESS);
         let register_future = hyp_mailbox.aleo/register_application(program_id);
 
         return async {
-            let metadata = Mapping::get(token_registry.aleo/registered_tokens, token_id);
-            let local_decimals = metadata.decimals;
-
-            let difference = remote_decimals as i16 - local_decimals as i16;
-            assert_eq(difference.abs() <= 18i16, true);
-
             // Token can only be initialized once
             let initialized: bool = app_metadata.contains(true);
             assert_eq(initialized, false);
 
             app_metadata.set(true, Metadata {
-                token_type: TYPE_COLLATERAL,
+                token_type: TYPE_SYNTHETIC,
                 token_owner: caller,
                 token_id: token_id,
                 ism: NULL_ADDRESS,
                 hook: NULL_ADDRESS,
-                local_decimals,
+                local_decimals: local_decimals,
                 remote_decimals: remote_decimals,
             });
 
+            register_token_future.await();
             register_future.await();
         };
     }
@@ -199,7 +203,7 @@ program hyp_collateral.aleo {
         let message_body = get_message_body(recipient, body_amount);
         
         let dispatch_future: Future = hyp_dispatch_proxy.aleo/dispatch(unverified_mailbox_state, destination, unverified_remote_router.recipient, message_body, custom_hook, hook_metadata, allowance);
-        let token_future: Future = token_registry.aleo/transfer_public_as_signer(unverified_app_metadata.token_id, self.address, amount);
+        let token_future: Future = token_registry.aleo/burn_public(unverified_app_metadata.token_id, self.signer, amount);
         return finalize_transfer_remote(dispatch_future, token_future, unverified_remote_router, destination, unverified_app_metadata);
     }
 
@@ -222,7 +226,7 @@ program hyp_collateral.aleo {
         let message_body = get_message_body(recipient, body_amount);
         
         let dispatch_future: Future = hyp_dispatch_proxy.aleo/dispatch(unverified_mailbox_state, destination, unverified_remote_router.recipient, message_body, custom_hook, hook_metadata, allowance);
-        let token_future: Future = token_registry.aleo/transfer_public_as_signer(unverified_app_metadata.token_id, self.address, amount);
+        let token_future: Future = token_registry.aleo/burn_public(unverified_app_metadata.token_id, self.signer, amount);
         return finalize_transfer_remote(dispatch_future, token_future, unverified_remote_router, destination, unverified_app_metadata);
     }
 
@@ -251,7 +255,7 @@ program hyp_collateral.aleo {
         let recipient = bytes_raw_to_address(address_raw);
         let amount = convert_ingoing_amount([message.body[2], message.body[3]], unverified_app_metadata.local_decimals, unverified_app_metadata.remote_decimals);
 
-        let token_future: Future = token_registry.aleo/transfer_public(unverified_app_metadata.token_id, recipient, amount);
+        let token_future: Future = token_registry.aleo/mint_public(unverified_app_metadata.token_id, recipient, amount, !0u32);
         return finalize_process(mailbox_future, unverified_app_metadata, message, token_future, unverified_ism);
     }
 
@@ -336,7 +340,6 @@ program hyp_collateral.aleo {
                 carry = current >> 64u32;
             }
 
-            // Assert that there is no overflow
             assert_eq(carry, 0u128);
 
             let upper_le: u128 = ((product[0] as u128) << 64u32) + (product[1] as u128);
@@ -403,10 +406,10 @@ program hyp_collateral.aleo {
         // Assert that the result fits in u64
         assert_eq(quotient[0], 0u64);
         assert_eq(quotient[1], 0u64);
-        
+
         // We allow for lossy downscaling here
         // and don't check remainder == 0
-
+        
         let amount = ((quotient[2] as u128) << 64u32) | (quotient[3] as u128);
         return amount;
     }
